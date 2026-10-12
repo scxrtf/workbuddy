@@ -42,33 +42,32 @@ const (
 )
 
 // fileVersion 是 usage.json 的当前格式版本。版本 2 增加积分观测字段，版本 3
-// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计，版本 5 增加 API key 维度；
+// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计；
 // 旧版本缺失字段按零值加载，旧数据不会丢弃。
-const fileVersion = 5
+const fileVersion = 4
 
 // bucket 一个 (时间片, realm, uid, model, rate) 的累计量。
 // JSON 字段名刻意取短，因为桶数量会随时间增长。
 type bucket struct {
-	Scope  string  `json:"s"`            // "h:2006-01-02T15" 或 "d:2006-01-02"
-	Realm  string  `json:"r"`            // cn / global
-	UID    string  `json:"u"`            // 账号 uid
-	Model  string  `json:"m"`            // 上游裸模型名
-	APIKey string  `json:"k,omitempty"`  // 命中的网关 API key（旧数据为空）
-	Rate   string  `json:"x,omitempty"`  // 请求时生效积分倍率（规范化数值；旧桶为空）
-	Req    int64   `json:"q"`            // 请求数（含失败）
-	Err    int64   `json:"e"`            // 失败数
-	PT     int64   `json:"p"`            // prompt tokens
-	CT     int64   `json:"c"`            // completion tokens
-	TT     int64   `json:"t"`            // total tokens（上游给什么用什么的合计）
-	LatMs  int64   `json:"l"`            // 延迟累计（ms）
-	LatN   int64   `json:"ln"`           // 延迟样本数
-	TPS    float64 `json:"v"`            // 吐字速率累计
-	TPSN   int64   `json:"vn"`           // 速率样本数
-	CR     float64 `json:"cr,omitempty"` // usage.credit 累计（仅明确存在的观测）
-	CRN    int64   `json:"cn,omitempty"` // usage.credit 样本数（区分缺字段与真实 0）
-	CRT    int64   `json:"ct,omitempty"` // 同时具备 credit 与 token 的 Token 合计
-	CH     int64   `json:"ch,omitempty"` // 前缀缓存命中 token 累计（上游回该维度才累计）
-	CM     int64   `json:"cm,omitempty"` // 前缀缓存未命中 token 累计
+	Scope string  `json:"s"`            // "h:2006-01-02T15" 或 "d:2006-01-02"
+	Realm string  `json:"r"`            // cn / global
+	UID   string  `json:"u"`            // 账号 uid
+	Model string  `json:"m"`            // 上游裸模型名
+	Rate  string  `json:"x,omitempty"`  // 请求时生效积分倍率（规范化数值；旧桶为空）
+	Req   int64   `json:"q"`            // 请求数（含失败）
+	Err   int64   `json:"e"`            // 失败数
+	PT    int64   `json:"p"`            // prompt tokens
+	CT    int64   `json:"c"`            // completion tokens
+	TT    int64   `json:"t"`            // total tokens（上游给什么用什么的合计）
+	LatMs int64   `json:"l"`            // 延迟累计（ms）
+	LatN  int64   `json:"ln"`           // 延迟样本数
+	TPS   float64 `json:"v"`            // 吐字速率累计
+	TPSN  int64   `json:"vn"`           // 速率样本数
+	CR    float64 `json:"cr,omitempty"` // usage.credit 累计（仅明确存在的观测）
+	CRN   int64   `json:"cn,omitempty"` // usage.credit 样本数（区分缺字段与真实 0）
+	CRT   int64   `json:"ct,omitempty"` // 同时具备 credit 与 token 的 Token 合计
+	CH    int64   `json:"ch,omitempty"` // 前缀缓存命中 token 累计（上游回该维度才累计）
+	CM    int64   `json:"cm,omitempty"` // 前缀缓存未命中 token 累计
 }
 
 // file 落盘结构。
@@ -82,7 +81,7 @@ type file struct {
 type Recorder struct {
 	mu      sync.Mutex
 	path    string
-	buckets map[string]*bucket // key: scope|realm|uid|model|rate|apiKey
+	buckets map[string]*bucket // key: scope|realm|uid|model|rate
 	dirty   bool
 	started time.Time
 
@@ -163,7 +162,7 @@ type Delta struct {
 //
 // ok=false 表示该次尝试失败（传输错误 / 上游 >=400 / 解析失败）。失败尝试通常
 // 没有 usage，但**仍要计入请求数与失败数**——重试放大正是靠这一列才看得出来。
-func (r *Recorder) Add(now time.Time, realm, uid, model, apiKey string, d Delta, ok bool) {
+func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool) {
 	if r == nil {
 		return
 	}
@@ -174,14 +173,14 @@ func (r *Recorder) Add(now time.Time, realm, uid, model, apiKey string, d Delta,
 		model = "(unknown)"
 	}
 	scope := "h:" + now.Format(hourLayout)
-	key := bucketKey(scope, realm, uid, model, d.ModelRate, apiKey)
+	key := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	b := r.buckets[key]
 	if b == nil {
-		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate, APIKey: apiKey}
+		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate}
 		r.buckets[key] = b
 	}
 	b.Req++
@@ -248,8 +247,7 @@ func (r *Recorder) Rollup(now time.Time) {
 			continue
 		}
 		day := "d:" + ts.Format(dayLayout)
-		to := bucketKey(day, b.Realm, b.UID, b.Model, b.Rate, b.APIKey)
-		moves = append(moves, move{from: k, to: to})
+		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate})
 	}
 	for _, m := range moves {
 		src := r.buckets[m.from]
@@ -302,14 +300,10 @@ func (r *Recorder) load() error {
 	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]
-		r.buckets[bucketKey(b.Scope, b.Realm, b.UID, b.Model, b.Rate, b.APIKey)] = &b
+		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
-}
-
-func bucketKey(scope, realm, uid, model, rate, apiKey string) string {
-	return scope + "|" + realm + "|" + uid + "|" + model + "|" + rate + "|" + apiKey
 }
 
 func (r *Recorder) flush(force bool) {
@@ -476,7 +470,6 @@ type Snapshot struct {
 	ByRealm         []KeyedAgg  `json:"by_realm"`
 	ByAccount       []KeyedAgg  `json:"by_account"`
 	ByModel         []KeyedAgg  `json:"by_model"`
-	ByAPIKey        []KeyedAgg  `json:"by_api_key"`
 	Series          []Point     `json:"series"`
 	CreditByAccount []CreditAgg `json:"credit_by_account"`
 	CreditByModel   []CreditAgg `json:"credit_by_model"`
@@ -577,7 +570,6 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	acctAgg := map[string]*aggAcc{}
 	acctRealm := map[string]string{}
 	modelAgg := map[string]*aggAcc{}
-	keyAgg := map[string]*aggAcc{}
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 	creditAcctAgg := map[string]*creditAcc{}
@@ -628,11 +620,6 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			modelAgg[b.Model] = &aggAcc{}
 		}
 		modelAgg[b.Model].add(b)
-
-		if keyAgg[b.APIKey] == nil {
-			keyAgg[b.APIKey] = &aggAcc{}
-		}
-		keyAgg[b.APIKey].add(b)
 
 		if strings.HasPrefix(b.Scope, "h:") {
 			scope := strings.TrimPrefix(b.Scope, "h:")
@@ -689,7 +676,6 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			return k, nicks[k]
 		}),
 		ByModel:         keyed(modelAgg, func(k string) (string, string) { return k, "" }),
-		ByAPIKey:        keyed(keyAgg, func(k string) (string, string) { return k, "" }),
 		CreditByAccount: creditKeyed(creditAcctAgg),
 		CreditByModel:   creditKeyed(creditModelAgg),
 		Buckets:         matched,

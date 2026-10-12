@@ -17,11 +17,10 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string   `json:"listen"`     // ":7863"
-	APIKey    string   `json:"api_key"`    // 兼容旧配置的主密钥；空 = 不参与
-	APIKeys   []string `json:"api_keys"`   // 自定义密钥列表；与 api_key 全空 = 不鉴权
-	AuthDir   string   `json:"auth_dir"`   // ./auths
-	StateFile string   `json:"state_file"` // ./data/state.json
+	Listen    string `json:"listen"`     // ":7863"
+	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	AuthDir   string `json:"auth_dir"`   // ./auths
+	StateFile string `json:"state_file"` // ./data/state.json
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -375,18 +374,11 @@ func WriteDefault(path string) (string, error) {
 }
 
 func applyEnv(c *Config) {
-	if v := os.Getenv("PORT"); v != "" && os.Getenv("WB2A_LISTEN") == "" {
-		// Railway/Nixpacks 等平台注入 PORT；显式 WB2A_LISTEN 仍优先。
-		c.Listen = ":" + strings.TrimSpace(v)
-	}
 	if v := os.Getenv("WB2A_LISTEN"); v != "" {
 		c.Listen = v
 	}
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v
-	}
-	if v := os.Getenv("WB2A_API_KEYS"); v != "" {
-		c.APIKeys = splitKeyList(v)
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v
@@ -572,8 +564,6 @@ func (c *Config) normalize() error {
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
 	}
-	c.APIKey = strings.TrimSpace(c.APIKey)
-	c.APIKeys = normalizeKeys(c.APIKeys)
 	// 空数组与 null 反序列化后覆盖掉 Default() 的排程值（键缺席才保留），在此补齐。
 	// 空 = 未配置 → 回落默认；「禁用」一律走 *_enabled=false，两者互不混淆。
 	if len(c.Schedule.CheckinHours) == 0 {
@@ -605,29 +595,6 @@ func (c *Config) normalize() error {
 		return err
 	}
 	return c.normalizePrompt()
-}
-
-func splitKeyList(v string) []string {
-	return strings.FieldsFunc(v, func(r rune) bool {
-		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
-	})
-}
-
-func normalizeKeys(keys []string) []string {
-	out := keys[:0:0]
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, key)
-	}
-	return out
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。

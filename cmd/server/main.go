@@ -234,7 +234,6 @@ func main() {
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
-		APIKeys:              cfg.APIKeys,
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
@@ -271,7 +270,6 @@ func main() {
 		Scheduler:   sch,
 		AuthDir:     cfg.AuthDir,
 		APIKey:      cfg.APIKey,
-		APIKeys:     cfg.APIKeys,
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		Version:     appVersion,
@@ -297,7 +295,6 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
-		APIKeys:      cfg.APIKeys,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
@@ -351,7 +348,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api keys=%d)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, len(cfg.APIKeys)+boolInt(cfg.APIKey != ""), panelListenPath(cfg.Listen))
+	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
@@ -407,13 +404,6 @@ func panelListenPath(listen string) string {
 		}
 	}
 	return listen
-}
-
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
 }
 
 // saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启的字段列表。
@@ -491,7 +481,6 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
-		APIKeys:              newCfg.APIKeys,
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,

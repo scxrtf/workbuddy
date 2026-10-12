@@ -26,16 +26,10 @@ COPY --from=build /out/credit /app/credit
 COPY login.sh signin.sh credit.sh /app/
 COPY scripts/probe_active.py /app/scripts/probe_active.py
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
-# 镜像刻意不带 config.json：首次启动由 wb2api 自动生成（含随机 api_key 与 0600 权限），
-# 这样既不会把样例里的 test_key 带进生产，又保证 app 用户对配置可写（面板保存配置需要）。
-# 需要固定密钥时用 WB2A_API_KEY / WB2A_API_KEYS 环境变量注入。
-# auth_dir/state_file 保持默认相对路径（WORKDIR=/app → /app/auths、/app/data/state.json），
-# 不用 ENV 写死，挂载的 config.json 才能改这两个路径。
+# 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
+COPY config.example.json /app/config.json
 USER app
-# 平台（Railway 等）注入的 PORT 优先；本地 compose 未设时回落 7863。
-ENV PORT=7863
-EXPOSE ${PORT}
-# shell 形式以便在运行时展开 PORT（exec 形式不做变量替换）。
+EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:${PORT:-7863}/healthz || exit 1
+  CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
 ENTRYPOINT ["/app/wb2api", "-config", "/app/config.json"]

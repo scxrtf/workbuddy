@@ -32,9 +32,8 @@ import (
 type Config struct {
 	Pool      *pool.Pool
 	Upstream  *upstream.Client
-	APIKey    string   // 旧配置主密钥；空 = 不参与（静态值；与 Live 同时给出时 Live 优先）
-	APIKeys   []string // 自定义密钥列表；与 APIKey 全空 = 不鉴权
-	MaxRotate int      // 单请求最多换号次数，默认 3
+	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	MaxRotate int    // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -84,7 +83,6 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	}
 	return livecfg.Snapshot{
 		APIKey:           h.cfg.APIKey,
-		APIKeys:          h.cfg.APIKeys,
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,
 	}
@@ -172,23 +170,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		live := h.loadLive()
-		key, ok := httpauth.MatchBearer(r, append([]string{live.APIKey}, live.APIKeys...)...)
-		if !ok {
+		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), apiKeyContextKey{}, key)))
+		next(w, r)
 	}
-}
-
-type apiKeyContextKey struct{}
-
-func apiKeyFrom(ctx context.Context) string {
-	if key, ok := ctx.Value(apiKeyContextKey{}).(string); ok {
-		return key
-	}
-	return ""
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -520,7 +507,6 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	apiKey := apiKeyFrom(r.Context())
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
@@ -671,7 +657,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
 				realm = a.Realm
 			}
-			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, apiKey, usage.Delta{
+			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
 				CompletionTokens: delta.CompletionTokens,

@@ -12,11 +12,11 @@ import (
 func TestAddAndTotals(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now, "cn", "uid1", "glm-5.2", "", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 50, HasCompletion: true, Credit: 1.5, HasCredit: true, ModelRate: "0.05", LatencyMs: 200, HasLatency: true}, true)
+	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 50, HasCompletion: true, Credit: 1.5, HasCredit: true, ModelRate: "0.05", LatencyMs: 200, HasLatency: true}, true)
 	// 失败尝试：无 usage → 只计请求数与失败数，token 不加。
-	r.Add(now, "global", "uid1", "claude-4.6", "", Delta{}, false)
+	r.Add(now, "global", "uid1", "claude-4.6", Delta{}, false)
 	// 上游没给 total 时用 pt+ct 兜底，保证总量口径连续。
-	r.Add(now, "cn", "uid1", "glm-5.2", "", Delta{PromptTokens: 10, HasPromptTokens: true, CompletionTokens: 5, HasCompletion: true}, true)
+	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 10, HasPromptTokens: true, CompletionTokens: 5, HasCompletion: true}, true)
 
 	s := r.Snapshot(24, nil)
 	if s.Totals.Requests != 3 || s.Totals.Errors != 1 {
@@ -55,9 +55,9 @@ func TestAddAndTotals(t *testing.T) {
 func TestRollupIdempotent(t *testing.T) {
 	r := New("")
 	old := time.Now().AddDate(0, 0, -100) // 100 天前，超出 90 天小时保留
-	r.Add(old, "cn", "u", "m", "", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
-	r.Add(old, "cn", "u", "m", "", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
-	r.Add(time.Now(), "cn", "u", "m", "", Delta{PromptTokens: 1, HasPromptTokens: true}, true)
+	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
+	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
+	r.Add(time.Now(), "cn", "u", "m", Delta{PromptTokens: 1, HasPromptTokens: true}, true)
 
 	r.Rollup(time.Now())
 	after := r.Snapshot(24, nil)
@@ -87,7 +87,7 @@ func TestRollupIdempotent(t *testing.T) {
 func TestFlushLoadRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	r1 := New(path)
-	r1.Add(time.Now(), "cn", "u1", "glm-5.2", "", Delta{PromptTokens: 42, HasPromptTokens: true, TotalTokens: 42, HasTotal: true}, true)
+	r1.Add(time.Now(), "cn", "u1", "glm-5.2", Delta{PromptTokens: 42, HasPromptTokens: true, TotalTokens: 42, HasTotal: true}, true)
 	r1.Save()
 
 	r2 := New(path)
@@ -99,72 +99,6 @@ func TestFlushLoadRoundtrip(t *testing.T) {
 	var f file
 	if err := json.Unmarshal(raw, &f); err != nil || f.Version != fileVersion || len(f.Buckets) != 1 {
 		t.Fatalf("落盘文件异常: err=%v buckets=%d", err, len(f.Buckets))
-	}
-}
-
-// 不同 API key 的用量分开累计（by_api_key），且与账号/模型维度互不干扰。
-func TestUsageByAPIKey(t *testing.T) {
-	r := New("")
-	now := time.Now()
-	r.Add(now, "cn", "u1", "m", "key-a", Delta{PromptTokens: 10, HasPromptTokens: true}, true)
-	r.Add(now, "cn", "u1", "m", "key-a", Delta{PromptTokens: 5, HasPromptTokens: true}, true)
-	r.Add(now, "cn", "u1", "m", "key-b", Delta{PromptTokens: 7, HasPromptTokens: true}, true)
-	r.Add(now, "cn", "u1", "m", "", Delta{PromptTokens: 1, HasPromptTokens: true}, true) // 无 key（旧数据）
-
-	s := r.Snapshot(0, nil)
-	if s.Totals.PromptTokens != 23 {
-		t.Fatalf("totals prompt=%d want 23", s.Totals.PromptTokens)
-	}
-	if len(s.ByAPIKey) != 3 {
-		t.Fatalf("by_api_key rows=%d want 3: %+v", len(s.ByAPIKey), s.ByAPIKey)
-	}
-	got := map[string]int64{}
-	for _, row := range s.ByAPIKey {
-		got[row.Key] = row.PromptTokens
-	}
-	if got["key-a"] != 15 || got["key-b"] != 7 || got[""] != 1 {
-		t.Fatalf("by_api_key=%+v want key-a=15 key-b=7 ''=1", got)
-	}
-	// 账号/模型维度不受 key 拆分影响。
-	if len(s.ByAccount) != 1 || s.ByAccount[0].PromptTokens != 23 {
-		t.Fatalf("by_account=%+v want one row 23", s.ByAccount)
-	}
-}
-
-// 旧 usage.json（无 API key 字段、版本 4）能被正常加载，历史数据不丢。
-func TestLoadLegacyBucketsWithoutAPIKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "usage.json")
-	legacy := `{"version":4,"saved":"2026-10-01T00:00:00Z","buckets":[{"s":"h:2026-10-01T10","r":"cn","u":"u1","m":"m","q":3,"p":12,"t":12}]}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := New(path)
-	s := r.Snapshot(0, nil)
-	if s.Totals.Requests != 3 || s.Totals.PromptTokens != 12 {
-		t.Fatalf("legacy totals=%+v want 3/12", s.Totals)
-	}
-	if len(s.ByAPIKey) != 1 || s.ByAPIKey[0].Key != "" {
-		t.Fatalf("legacy by_api_key=%+v want one empty-key row", s.ByAPIKey)
-	}
-}
-
-// 折叠成日桶后 API key 维度必须保留（否则长期趋势里各 key 用量会混在一起）。
-func TestRollupKeepsAPIKey(t *testing.T) {
-	r := New("")
-	old := time.Now().AddDate(0, 0, -100)
-	r.Add(old, "cn", "u", "m", "key-a", Delta{PromptTokens: 4, HasPromptTokens: true}, true)
-	r.Add(old, "cn", "u", "m", "key-b", Delta{PromptTokens: 6, HasPromptTokens: true}, true)
-	r.Rollup(time.Now())
-	s := r.Snapshot(0, nil)
-	if len(s.ByAPIKey) != 2 {
-		t.Fatalf("after rollup by_api_key=%+v want 2 rows", s.ByAPIKey)
-	}
-	got := map[string]int64{}
-	for _, row := range s.ByAPIKey {
-		got[row.Key] = row.PromptTokens
-	}
-	if got["key-a"] != 4 || got["key-b"] != 6 {
-		t.Fatalf("after rollup by_api_key=%+v", got)
 	}
 }
 
@@ -189,8 +123,8 @@ func TestLoadLegacyWithoutCredit(t *testing.T) {
 func TestCreditSurvivesRollup(t *testing.T) {
 	r := New("")
 	old := time.Now().AddDate(0, 0, -100)
-	r.Add(old, "cn", "u", "m", "", Delta{PromptTokens: 100, HasPromptTokens: true, TotalTokens: 100, HasTotal: true, Credit: 1.25, HasCredit: true, ModelRate: "0.5"}, true)
-	r.Add(old.Add(2*time.Hour), "cn", "u", "m", "", Delta{PromptTokens: 300, HasPromptTokens: true, TotalTokens: 300, HasTotal: true, Credit: 3.75, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 100, HasPromptTokens: true, TotalTokens: 100, HasTotal: true, Credit: 1.25, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(old.Add(2*time.Hour), "cn", "u", "m", Delta{PromptTokens: 300, HasPromptTokens: true, TotalTokens: 300, HasTotal: true, Credit: 3.75, HasCredit: true, ModelRate: "0.5"}, true)
 	r.Rollup(time.Now())
 	s := r.Snapshot(0, nil)
 	if s.Totals.Credits != 5 || s.Totals.CreditSamples != 2 || s.Totals.CreditTokens != 400 || s.Totals.CreditsPer1MTokens != 12500 {
@@ -205,9 +139,9 @@ func TestCreditSurvivesRollup(t *testing.T) {
 func TestCreditDimensionsRateGrouping(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now, "cn", "u1", "cn:glm-5.2", "", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true, ModelRate: "0.5"}, true)
-	r.Add(now.Add(time.Hour), "cn", "u2", "glm-5.2", "", Delta{TotalTokens: 200, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.5"}, true)
-	r.Add(now.Add(2*time.Hour), "cn", "u2", "glm-5.2", "", Delta{TotalTokens: 300, HasTotal: true, Credit: 6, HasCredit: true, ModelRate: "0.8"}, true)
+	r.Add(now, "cn", "u1", "cn:glm-5.2", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(now.Add(time.Hour), "cn", "u2", "glm-5.2", Delta{TotalTokens: 200, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(now.Add(2*time.Hour), "cn", "u2", "glm-5.2", Delta{TotalTokens: 300, HasTotal: true, Credit: 6, HasCredit: true, ModelRate: "0.8"}, true)
 
 	s := r.Snapshot(24, nil)
 	if len(s.CreditByAccount) != 2 || len(s.CreditByModel) != 2 {
@@ -226,8 +160,8 @@ func TestCreditDimensionsRateGrouping(t *testing.T) {
 func TestCreditLegacyRateFallback(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now, "cn", "u1", "glm-5.2", "", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true}, true)
-	r.Add(now.Add(time.Hour), "cn", "u1", "glm-5.2", "", Delta{TotalTokens: 200, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.79"}, true)
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true}, true)
+	r.Add(now.Add(time.Hour), "cn", "u1", "glm-5.2", Delta{TotalTokens: 200, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.79"}, true)
 
 	s := r.SnapshotWithRates(24, nil, func(realm, model string) string {
 		if realm == "cn" && model == "glm-5.2" {
@@ -246,8 +180,8 @@ func TestCreditLegacyRateFallback(t *testing.T) {
 func TestSnapshotWindowFilter(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now.Add(-48*time.Hour), "cn", "u", "m", "", Delta{PromptTokens: 5, HasPromptTokens: true}, true) // 窗口(24h)外
-	r.Add(now, "cn", "u", "m", "", Delta{PromptTokens: 3, HasPromptTokens: true}, true)                    // 窗口内
+	r.Add(now.Add(-48*time.Hour), "cn", "u", "m", Delta{PromptTokens: 5, HasPromptTokens: true}, true) // 窗口(24h)外
+	r.Add(now, "cn", "u", "m", Delta{PromptTokens: 3, HasPromptTokens: true}, true)                    // 窗口内
 	s := r.Snapshot(24, nil)
 	if s.Totals.Requests != 1 || s.Totals.PromptTokens != 3 {
 		t.Fatalf("24h 窗口 totals = %d/%d, want 1/3（48h 前的数据应被过滤）", s.Totals.Requests, s.Totals.PromptTokens)
@@ -275,7 +209,7 @@ func TestSnapshotExplicitWindow(t *testing.T) {
 	r := New("")
 	base := time.Now().Truncate(time.Hour).Add(-5 * time.Hour)
 	for i := 0; i < 6; i++ {
-		r.Add(base.Add(time.Duration(i)*time.Hour), "cn", "u", "m", "",
+		r.Add(base.Add(time.Duration(i)*time.Hour), "cn", "u", "m",
 			Delta{PromptTokens: 10, HasPromptTokens: true}, true)
 	}
 	// 只取中间两小时（base+2h、base+3h）。
@@ -362,7 +296,7 @@ func TestLifecycleFlush(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	r := New(path)
 	r.Start()
-	r.Add(time.Now(), "cn", "u", "m", "", Delta{PromptTokens: 9, HasPromptTokens: true}, true)
+	r.Add(time.Now(), "cn", "u", "m", Delta{PromptTokens: 9, HasPromptTokens: true}, true)
 	r.Stop()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Stop 后应有落盘文件: %v", err)
@@ -374,12 +308,12 @@ func TestLifecycleFlush(t *testing.T) {
 func TestCacheHitRateAccumulation(t *testing.T) {
 	r := New(t.TempDir() + "/usage.json")
 	base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.Local)
-	r.Add(base, "cn", "u1", "glm-5.3", "", Delta{
+	r.Add(base, "cn", "u1", "glm-5.3", Delta{
 		PromptTokens: 1000, HasPromptTokens: true,
 		Credit: 1, HasCredit: true, TotalTokens: 1005, HasTotal: true,
 		HasCacheTokens: true, CacheHitTokens: 900, CacheMissTokens: 100,
 	}, true)
-	r.Add(base.Add(time.Minute), "cn", "u1", "glm-5.3", "", Delta{
+	r.Add(base.Add(time.Minute), "cn", "u1", "glm-5.3", Delta{
 		PromptTokens: 1000, HasPromptTokens: true,
 		Credit: 2, HasCredit: true, TotalTokens: 1004, HasTotal: true,
 		HasCacheTokens: true, CacheHitTokens: 100, CacheMissTokens: 900,
@@ -397,7 +331,7 @@ func TestCacheHitRateAccumulation(t *testing.T) {
 
 	// 无缓存观测的桶：rate 零值。
 	r2 := New(t.TempDir() + "/usage2.json")
-	r2.Add(base, "cn", "u1", "m", "", Delta{PromptTokens: 10, HasPromptTokens: true, Credit: 1, HasCredit: true, TotalTokens: 12, HasTotal: true}, true)
+	r2.Add(base, "cn", "u1", "m", Delta{PromptTokens: 10, HasPromptTokens: true, Credit: 1, HasCredit: true, TotalTokens: 12, HasTotal: true}, true)
 	if got := r2.Snapshot(0, nil).CreditByModel[0].CacheHitRate; got != 0 {
 		t.Fatalf("无缓存观测应 rate=0, got %v", got)
 	}
@@ -408,7 +342,7 @@ func TestCacheTokensPersistRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	r := New(dir + "/usage.json")
 	base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.Local)
-	r.Add(base, "cn", "u1", "m", "", Delta{
+	r.Add(base, "cn", "u1", "m", Delta{
 		Credit: 1, HasCredit: true, TotalTokens: 100, HasTotal: true,
 		HasCacheTokens: true, CacheHitTokens: 75, CacheMissTokens: 25,
 	}, true)

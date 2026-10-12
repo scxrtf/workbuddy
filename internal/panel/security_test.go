@@ -3,22 +3,13 @@ package panel
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 func newTestPanel() *Panel {
-	// 面板不再做 key 鉴权，所有请求都会进入 handler，因此必须给一个真实 Pool，
-	// 否则 overview 里的 CountsDetailedWithPaused 会 nil 解引用。
-	dir, err := os.MkdirTemp("", "panel-test-*")
-	if err != nil {
-		panic(err)
-	}
-	return New(Config{Version: "test", Pool: pool.New(filepath.Join(dir, "state.json"))})
+	// 启用鉴权：未带 key 的请求一律 401，不进入依赖 Pool/Upstream 的 handler。
+	return New(Config{Version: "test", APIKey: "test-key"})
 }
 
 // 面板安全响应头必须覆盖：页面、静态脚本、鉴权失败响应。
@@ -136,12 +127,20 @@ func TestValidUID(t *testing.T) {
 	}
 }
 
-// 管理面板不要求 Bearer 鉴权：无头请求直接放行（网关 /v1/* 仍鉴权）。
-func TestPanelAuthLayerOpen(t *testing.T) {
+// 未带密钥的 API 请求必须 401；携带正确密钥则通过鉴权层（不再是 401）。
+func TestAuthLayerBehavior(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/overview", nil))
-	if rec.Code == http.StatusUnauthorized {
-		t.Fatalf("panel must not require a key: code=%d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no key: code=%d want 401", rec.Code)
+	}
+	// 用不存在的路由验证"带正确 key 已过鉴权"（避免触碰依赖 nil 的 handler）。
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/panel/api/nonexistent", nil)
+	req2.Header.Set("Authorization", "Bearer test-key")
+	p.ServeHTTP(rec2, req2)
+	if rec2.Code == http.StatusUnauthorized {
+		t.Error("valid key must pass the auth layer")
 	}
 }

@@ -851,7 +851,6 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="vtabs" id="usDimTabs">
             <button data-dim="account" class="on">按账号</button>
             <button data-dim="model">按模型</button>
-            <button data-dim="api_key">按 Key</button>
             <button data-dim="realm">按域</button>
           </span>
           <span class="grow"></span>
@@ -903,15 +902,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">监听地址</span>
                 <input name="listen" placeholder=":7863">
                 <span class="hint">改动需重启进程</span></label>
-              <label class="fld"><span class="lb">主 API 密钥</span>
-                <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不参与鉴权">
+              <label class="fld"><span class="lb">API 密钥</span>
+                <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
                 <button type="button" class="xs" id="btnEye">显示</button></div>
-                <span class="hint">兼容旧配置；立即生效</span></label>
+                <span class="hint">立即生效（含面板自身）</span></label>
             </div>
-            <label class="fld"><span class="lb">自定义 API Keys</span>
-              <textarea name="api_keys" rows="4" placeholder="每行一个 key，例如 sk-xxx"></textarea>
-              <div class="inline"><button type="button" class="xs" id="btnAddKey">生成一个随机 Key</button>
-              <span class="hint">全部留空 = 关闭网关鉴权</span></div></label>
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
               <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
@@ -1239,6 +1234,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 密钥 -->
+<div class="veil" id="keyVeil" data-lock="1">
+  <div class="dlg" style="width:420px">
+    <header>
+      <h3>需要访问密钥</h3>
+      <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
+    </header>
+    <div class="body">
+      <form style="display:contents" onsubmit="return false"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
+      <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button class="primary" id="btnKey">进入</button>
     </footer>
   </div>
 </div>

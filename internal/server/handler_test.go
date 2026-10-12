@@ -1074,64 +1074,6 @@ func TestAPIKeyAuth(t *testing.T) {
 	}
 }
 
-// 自定义 key 列表（api_keys）与旧主密钥必须都能通过网关鉴权，且错误 key 仍 401。
-func TestMultipleAPIKeys(t *testing.T) {
-	h := NewHandler(Config{
-		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
-		Upstream: upstream.New(),
-		APIKey:   "secret",
-		APIKeys:  []string{"client-a", "client-b"},
-	})
-	for _, key := range []string{"secret", "client-a", "client-b"} {
-		req := httptest.NewRequest("GET", "/v1/models", nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != 200 {
-			t.Errorf("key %q: code=%d want 200", key, rec.Code)
-		}
-	}
-	req := httptest.NewRequest("GET", "/v1/models", nil)
-	req.Header.Set("Authorization", "Bearer nope")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != 401 {
-		t.Errorf("unknown key: code=%d want 401", rec.Code)
-	}
-}
-
-// 用量必须归属到请求实际命中的 key：多 key 场景下按 key 拆账才能对得上。
-// 直接驱动 withAuth → 用量记录器，验证「命中的 key 进 context → 传给 Usage.Add」整条链。
-func TestUsageAttributedToMatchedAPIKey(t *testing.T) {
-	rec := usage.New("")
-	h := NewHandler(Config{
-		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
-		Upstream: upstream.New(),
-		APIKeys:  []string{"client-a", "client-b"},
-		Usage:    rec,
-	})
-	makeReq := func(key string) *http.Request {
-		req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		return req
-	}
-	handler := h.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		rec.Add(time.Now(), "cn", "u1", "m", apiKeyFrom(r.Context()), usage.Delta{PromptTokens: 10, HasPromptTokens: true}, true)
-	})
-	handler(httptest.NewRecorder(), makeReq("client-a"))
-	handler(httptest.NewRecorder(), makeReq("client-a"))
-	handler(httptest.NewRecorder(), makeReq("client-b"))
-
-	s := rec.Snapshot(0, nil)
-	got := map[string]int64{}
-	for _, row := range s.ByAPIKey {
-		got[row.Key] = row.PromptTokens
-	}
-	if got["client-a"] != 20 || got["client-b"] != 10 {
-		t.Fatalf("by_api_key=%+v want client-a=20 client-b=10", got)
-	}
-}
-
 func TestStatusEndpoint(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	p.SetCredits("u1", 42, 0)

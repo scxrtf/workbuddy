@@ -307,36 +307,6 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ```
 
-### 方式四：Railway 托管
-
-仓库已带 `railway.toml`（Dockerfile builder + `/healthz` 健康检查 + 失败重启），
-[Railway](https://railway.com) 里「Deploy from GitHub repo」选本仓库即可，其余在 Variables 面板完成。
-
-| 变量 | 必填 | 说明 |
-|---|---|---|
-| `PORT` | 平台注入 | Railway 自动注入；程序自动跟随（`WB2A_LISTEN` 显式设置时优先） |
-| `WB2A_API_KEY` | 建议 | 主密钥；客户端用 `Authorization: Bearer <key>` 调用 `/v1/*` |
-| `WB2A_API_KEYS` | 建议 | 额外密钥，逗号或换行分隔（如 `sk-a,sk-b`）；与 `WB2A_API_KEY` 合起来是允许列表 |
-| `WB2A_AUTH_DIR` | volume 时 | 账号凭证目录，挂卷后设成卷内路径 |
-| `WB2A_STATE_FILE` | volume 时 | 池状态文件（`usage.json` 与请求归档落在它的同级目录） |
-| `TZ` | 可选 | 建议 `Asia/Shanghai`（签到/保活按本地时区整点触发） |
-
-**持久化**：在 Railway 给服务加一个 Volume 并挂到 `/app/data`（凭证继续留在镜像内 `/app/auths` 也能跑，
-但重新部署会丢，所以一并挂 `/app/auths` 更稳）。卷挂上后把两个路径写进变量：
-
-```bash
-WB2A_AUTH_DIR=/app/auths
-WB2A_STATE_FILE=/app/data/state.json
-```
-
-**配置从哪来**：镜像内**不含** `config.json`。首次启动程序会在 `/app/config.json` 自动生成推荐配置
-（含 `crypto/rand` 随机密钥、0600 权限），自动生成的随机密钥每次重新部署都会变，
-所以要让 key 稳定就必须在 Variables 里显式设 `WB2A_API_KEY` / `WB2A_API_KEYS`——env 优先级高于文件。
-
-> ⚠️ **Railway 是公网部署，而管理面板 `/panel/` 无鉴权**——任何人拿到域名就能改配置、加删账号、
-> 看用量明细。上生产前请至少做一件事：给面板路径加一层访问控制（Cloudflare Access / 前置反代 Basic Auth），
-> 或干脆不暴露面板端点。同时**务必设置** `WB2A_API_KEY` / `WB2A_API_KEYS`，否则 `/v1/*` 与 `/status` 完全公开。
-
 ### 添加账号（登录）
 
 **方式 A：Web 面板（推荐，各平台通用，免命令行）**
@@ -386,7 +356,6 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|
 | `listen` | `:7863` | HTTP 监听地址 |
 | `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
-| `api_keys` | `[]` | 自定义网关密钥列表（可多个，逐条独立生效）；与 `api_key` 全空 = 不鉴权 |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
@@ -447,21 +416,6 @@ curl -s http://localhost:7863/v1/chat/completions \
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
-
-另有两个平台变量：`PORT`（Railway / Nixpacks 注入，未显式设 `WB2A_LISTEN` 时监听 `:$PORT`）与
-`WB2A_API_KEYS`（逗号或换行分隔的额外密钥列表）。
-
-### 多 API Key 与按 Key 统计
-
-`api_key`（旧字段，单个）+ `api_keys`（新字段，列表）合起来是网关的**密钥允许列表**，
-客户端带其中任意一个都能通过：`Authorization: Bearer <key>`。两者全空 = 不鉴权（仅限内网/本机）。
-
-- 面板「配置」页可**逐行编辑** `api_keys`，点「生成一个随机 Key」用 `crypto.getRandomValues` 现造一个 `sk-…`；
-  保存后立即热生效，无需重启（实测：新增 key 下一次请求就通过）。
-- 每次请求会把**命中的那个 key** 记进用量桶，面板「用量 → 用量明细 → 按 Key」按 key 拆账：
-  请求数 / token / 失败数 / 平均延迟各自独立成行，与「按账号」「按模型」维度互不干扰。
-- 未鉴权时期产生的历史用量（旧 `usage.json`）归入一行 `(无 key)`，不会凭空消失。
-- `usage.json` 结构版本升到 5（新增 key 维度），旧版本文件仍可正常加载。
 
 ## 核心行为语义
 
@@ -673,18 +627,17 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 http://127.0.0.1:7863/panel/
 ```
 
-面板自身**不设鉴权**（打开即可用，不再弹密钥输入框）：网关密钥只用于 `/v1/*` 与 `/status`。
-因此公网部署时请自行加访问控制（见下方「Railway 部署」的安全提示）。
+鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
 界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
 
 | 视图 | 功能 |
 |---|---|
 | **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
-| **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / **按 Key** / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
+| **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
 | **模型与档位** | 实时查询上游：每模型的积分倍率（含限时免费 / 夜间折扣等**生效价**与划线牌价）、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出；存在探测数据时最大输出列显示**实测上限与钳制告警**（见「探测模型真实输出上限」）。支持**按条件查询**：关键词（ID / 名称 / 描述 / 厂商 / 标签，空格分词 AND）、域（CN / Global）、能力（工具 / 视觉 / 思考 / 默认）、思考档位、价格（折扣 / 限时免费 / 打折），以及按倍率 / 上下文 / 最大输出 / ID 排序 |
-| **配置** | 在线编辑 config.json：服务（监听地址 / 主 API 密钥 / **自定义 API Keys（多行，可一键生成随机 Key）** / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
+| **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
 | **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动 |
 
 顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 cockpit tools 导出的 JSON）。
@@ -705,14 +658,14 @@ http://127.0.0.1:7863/panel/
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`api_keys`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
+`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
 ### 面板接口（`/panel/api/*`）
 
-面板接口**无鉴权**（与页面一致），可直接脚本化调用——公网部署前请先加访问控制：
+与页面同一 Bearer 鉴权，可直接脚本化调用：
 
 | 分组 | 端点 |
 |---|---|
@@ -734,13 +687,12 @@ http://127.0.0.1:7863/panel/
 
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /v1/chat/completions` | Bearer（有密钥时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
-| `GET /v1/models` | Bearer（有密钥时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
-| `GET /status` | Bearer（有密钥时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
+| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
-> 鉴权规则：`api_key` 与 `api_keys` 合起来是**允许列表**——请求携带其中任意一个即通过（`Authorization: Bearer <key>`）；
-> **两者全空时上述端点直接放行**；`/healthz` 恒无鉴权。匹配用 SHA-256 + 常量时间比较，不泄露密钥。
+> 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
@@ -884,8 +836,6 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 ### 2. 网络暴露与日志敏感度
 
 - 默认监听 `:7863`，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
-- **管理面板 `/panel/` 无鉴权**：打开域名即可改配置、加删账号、看用量。公网部署（Railway 等）必须自行加访问控制
-  （Cloudflare Access / 前置反代 Basic Auth），或只在本机 / 私有网络开放面板端口
 - 请求日志字段：序号 / 模型 / 模式 / 状态码 / **uid 前 8 位** / TTFB / token 数——**不含** `accessToken` / `refreshToken` / `api_key` 明文（不读取 `Authorization` 头）
 - 日志写 **stdout / stderr**（容器内进入 `docker logs`），代码无任何落盘日志文件
 

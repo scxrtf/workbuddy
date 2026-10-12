@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -36,8 +37,7 @@ type Config struct {
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 兼容字段；面板不再做 key 鉴权
-	APIKeys   []string             // 兼容字段；仅用于 overview 展示网关鉴权状态
+	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
 	Version   string               // 面板版本号（展示用）
 
@@ -195,11 +195,25 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mux.ServeHTTP(w, r)
 }
 
-// withAuth 仅保留装配点；管理面板按需求不做 key 鉴权。
+// withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
+// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
+// 即用新值（无需重启）。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyBearer(r, p.apiKey()) {
+			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
+			return
+		}
 		next(w, r)
 	}
+}
+
+// apiKey 当前生效密钥（Live 优先，回落静态字段）。
+func (p *Panel) apiKey() string {
+	if p.cfg.Live != nil {
+		return p.cfg.Live.Load().APIKey
+	}
+	return p.cfg.APIKey
 }
 
 // expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
@@ -224,30 +238,22 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		sticky = p.cfg.StickyCount()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":           p.cfg.Version,
-		"uptime_sec":        int(time.Since(p.started).Seconds()),
-		"api_auth_required": len(p.apiKeys()) > 0,
-		"redis_mode":        p.cfg.RedisMode,
-		"sticky_sessions":   sticky,
-		"total":             total,
-		"healthy":           healthy,
-		"cooling":           cooling,
-		"disabled":          disabled,
-		"paused":            paused,
-		"in_flight_full":    inFlightFull,
-		"accounts":          p.cfg.Pool.List(),
+		"version":         p.cfg.Version,
+		"uptime_sec":      int(time.Since(p.started).Seconds()),
+		"auth_required":   p.apiKey() != "",
+		"redis_mode":      p.cfg.RedisMode,
+		"sticky_sessions": sticky,
+		"total":           total,
+		"healthy":         healthy,
+		"cooling":         cooling,
+		"disabled":        disabled,
+		"paused":          paused,
+		"in_flight_full":  inFlightFull,
+		"accounts":        p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
 	})
-}
-
-func (p *Panel) apiKeys() []string {
-	if p.cfg.Live != nil {
-		s := p.cfg.Live.Load()
-		return append([]string{s.APIKey}, s.APIKeys...)
-	}
-	return append([]string{p.cfg.APIKey}, p.cfg.APIKeys...)
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
