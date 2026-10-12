@@ -1,4 +1,4 @@
-// Package httpauth 网关与面板共用的 Bearer 鉴权原语。
+// Package httpauth 网关 Bearer 鉴权原语。
 //
 // 单独成包的原因：server（/v1/*、/status）与 panel（/panel/api/*）两处鉴权
 // 必须完全同口径——此前各自复制了一份"字符串直接比较"的实现，既容易漂移，
@@ -23,17 +23,40 @@ const bearerPrefix = "Bearer "
 //   - 先摘要再比较，长度差异被吸收进摘要（不会因长度不同提前返回）；
 //   - 摘要本身不可逆，即便有侧信道也拿不到密钥原文。
 func VerifyBearer(r *http.Request, key string) bool {
-	if key == "" {
-		return true
+	_, ok := MatchBearer(r, key)
+	return ok
+}
+
+// MatchBearer 在多个密钥中匹配 Authorization: Bearer token。
+//
+// 返回命中的密钥，供调用方把用量归属到具体 key；keys 全为空表示“未启用鉴权”，
+// 恒返回 ("", true)。比较仍走 SHA-256 + constant-time，保持既有防侧信道语义。
+func MatchBearer(r *http.Request, keys ...string) (string, bool) {
+	var valid []string
+	for _, key := range keys {
+		if key != "" {
+			valid = append(valid, key)
+		}
+	}
+	if len(valid) == 0 {
+		return "", true
 	}
 	authz := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authz, bearerPrefix) {
-		// 缺头/方案不对：仍走一次摘要比较，保持耗时形状一致。
-		subtle.ConstantTimeCompare(digest(""), digest(key))
-		return false
+		// 缺头/方案不对：仍做一次摘要比较，保持耗时形状一致。
+		for _, key := range valid {
+			subtle.ConstantTimeCompare(digest(""), digest(key))
+		}
+		return "", false
 	}
 	tok := authz[len(bearerPrefix):]
-	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
+	target := digest(tok)
+	for _, key := range valid {
+		if subtle.ConstantTimeCompare(target, digest(key)) == 1 {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。

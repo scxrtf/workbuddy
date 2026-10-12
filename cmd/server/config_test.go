@@ -99,12 +99,64 @@ func TestLoadFile(t *testing.T) {
 func TestEnvOverride(t *testing.T) {
 	t.Setenv("WB2A_LISTEN", ":7777")
 	t.Setenv("WB2A_API_KEY", "envkey")
+	t.Setenv("WB2A_API_KEYS", "k1, k2\nk1")
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.Listen != ":7777" || c.APIKey != "envkey" {
 		t.Errorf("c=%+v", c)
+	}
+	// 自定义 key 列表：逗号/换行分隔，trim 后去重。
+	if len(c.APIKeys) != 2 || c.APIKeys[0] != "k1" || c.APIKeys[1] != "k2" {
+		t.Errorf("api_keys=%v want [k1 k2]", c.APIKeys)
+	}
+}
+
+// Railway / Nixpacks 注入 PORT：未显式设 WB2A_LISTEN 时监听地址跟随 PORT。
+func TestPortEnvOverride(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":8080" {
+		t.Errorf("listen=%q want :8080", c.Listen)
+	}
+	t.Setenv("WB2A_LISTEN", ":9999")
+	c, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":9999" {
+		t.Errorf("explicit WB2A_LISTEN must win: listen=%q", c.Listen)
+	}
+}
+
+// 自定义 key 列表（api_keys）在 normalize 里 trim + 去空 + 去重；
+// 空列表 = 未启用（与 api_key 一起全空时网关不鉴权）。
+func TestAPIKeysNormalized(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"api_keys":[" k1 ", "k2", "", "k1", "  "]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.APIKeys) != 2 || c.APIKeys[0] != "k1" || c.APIKeys[1] != "k2" {
+		t.Fatalf("api_keys=%v want [k1 k2]", c.APIKeys)
+	}
+	empty, err := ParseConfig([]byte(`{"api_keys":[],"api_key":""}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.APIKeys) != 0 || empty.APIKey != "" {
+		t.Fatalf("empty api_keys=%v api_key=%q want none", empty.APIKeys, empty.APIKey)
+	}
+	// 旧配置只有 api_key 时不受影响（零回归）。
+	legacy, err := ParseConfig([]byte(`{"api_key":"legacy"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.APIKey != "legacy" || len(legacy.APIKeys) != 0 {
+		t.Fatalf("legacy config=%+v", legacy)
 	}
 }
 

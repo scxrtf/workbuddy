@@ -1,6 +1,6 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
-const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
+const LS_THEME = 'wb2api.theme';
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
@@ -41,11 +41,8 @@ applyTheme();
 /* ── 请求 ─────────────────────────────────────────────────────────── */
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
-  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
@@ -314,20 +311,6 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
-/* ── 密钥门 ───────────────────────────────────────────────────────── */
-function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
-$('btnKey').onclick = async () => {
-  const v = $('keyInput').value.trim();
-  if (!v) return;
-  localStorage.setItem(LS_KEY, v);
-  try {
-    await api('overview');
-    $('keyErr').hidden = true;
-    $('keyVeil').classList.remove('on');
-    start();
-  } catch (e) { $('keyErr').hidden = false; }
-};
-$('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 /* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
@@ -966,7 +949,7 @@ $('btnLogPin').onclick = () => {
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
-  listen: ['listen'], api_key: ['api_key'],
+  listen: ['listen'], api_key: ['api_key'], api_keys: ['api_keys'],
   package_detail_limit: ['panel', 'package_detail_limit'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
@@ -1006,6 +989,11 @@ const CFG_MAP = {
 const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
+// API keys 是多行文本框：按换行展示，避免一个超长框里塞逗号串。
+function cfgKeyText(v) { return Array.isArray(v) ? v.join('\n') : ''; }
+function parseKeyList(raw) {
+  return String(raw || '').split(/[\n\r,，\t ]+/).map(s => s.trim()).filter(Boolean);
+}
 function put(obj, path, val) {
   let o = obj;
   for (let i = 0; i < path.length - 1; i++) { if (typeof o[path[i]] !== 'object' || o[path[i]] === null) o[path[i]] = {}; o = o[path[i]]; }
@@ -1023,6 +1011,7 @@ async function loadConfig() {
       if (!el) continue;
       const v = dig(cfgLoaded, path);
       if (el.type === 'checkbox') el.checked = !!v;
+      else if (name === 'api_keys') el.value = cfgKeyText(v);
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
     }
@@ -1037,6 +1026,7 @@ function collectConfig() {
     if (!el) continue;
     let v;
     if (el.type === 'checkbox') v = el.checked;
+    else if (name === 'api_keys') v = parseKeyList(el.value); // 空输入照发 []，否则无法清空
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
     else {
       const raw = el.value.trim();
@@ -1081,6 +1071,22 @@ $('btnEye').onclick = () => {
   el.type = show ? 'text' : 'password';
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
+$('btnAddKey').onclick = () => {
+  const el = $('cfgForm').elements['api_keys'];
+  const cur = parseKeyList(el.value);
+  cur.push(randomAPIKey());
+  el.value = cur.join('\n');
+  el.focus();
+};
+function randomAPIKey() {
+  const bytes = new Uint8Array(18);
+  (window.crypto || {}).getRandomValues
+    ? crypto.getRandomValues(bytes)
+    : bytes.forEach((_, i) => { bytes[i] = Math.floor(Math.random() * 256); });
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return 'sk-' + btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 $('btnCfgReload').onclick = loadConfig;
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
@@ -1099,9 +1105,6 @@ $('cfgForm').onsubmit = async ev => {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
     const n = (r.restart_required || []).length;
     toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
-    // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
-    const k = $('cfgKey').value.trim();
-    if (k) localStorage.setItem(LS_KEY, k);
     loadConfig();
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
@@ -1179,11 +1182,8 @@ $('importFile').onchange = async () => {
   $('importDone').hidden = true; $('importErr').hidden = true;
   const fd = new FormData();
   fd.append('file', file);
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
   try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     $('importDone').hidden = false;
@@ -1223,11 +1223,6 @@ function start() {
   loadOverview(true);
   if (refTimer) clearInterval(refTimer);
   refTimer = setInterval(refreshVisible, 5000);
-  checkAuthGate();
-}
-async function checkAuthGate() {
-  try { await api('overview'); }
-  catch (e) { if (String(e.message).includes('密钥') || String(e.message).includes('api_key')) return; }
 }
 start();
 
@@ -1887,6 +1882,7 @@ const US_DIMS = {
   account: { key: 'by_account', title: '账号', withRealm: true, withPerf: true, span: 10 },
   model: { key: 'by_model', title: '模型', withRealm: false, withPerf: false, span: 7 },
   realm: { key: 'by_realm', title: 'realm', withRealm: false, withPerf: false, span: 7 },
+  api_key: { key: 'by_api_key', title: 'API Key', withRealm: false, withPerf: false, span: 7 },
 };
 
 // usSortRows 按当前排序字段降序（默认合计 Token，最大者最相关）。
@@ -1921,7 +1917,7 @@ function usTabsHtml(dims, active, counts) {
   }).join('');
 }
 
-const US_DIM_TABS = [['account', '按账号'], ['model', '按模型'], ['realm', '按域']];
+const US_DIM_TABS = [['account', '按账号'], ['model', '按模型'], ['api_key', '按 Key'], ['realm', '按域']];
 
 function renderUsageDim() {
   const d = usageData || {};
@@ -1930,11 +1926,13 @@ function renderUsageDim() {
   $('usDimTabs').innerHTML = usTabsHtml(US_DIM_TABS, usDim, {
     account: (d.by_account || []).length,
     model: (d.by_model || []).length,
+    api_key: (d.by_api_key || []).length,
     realm: (d.by_realm || []).length,
   });
   $('usDimHead').innerHTML = usDimHead(usDim);
   $('usDimBody').innerHTML = rows.map(x =>
-    usRow(usDim === 'account' ? String(x.key || '').slice(0, 8) : x.key,
+    usRow(usDim === 'account' ? String(x.key || '').slice(0, 8)
+      : usDim === 'api_key' ? (x.key || '(无 key)') : x.key,
       usDim === 'account' ? (x.extra || '') : '',
       x,
       usDim === 'account' ? '<td class="num">' + esc(x.realm || '') + '</td>' : '',
